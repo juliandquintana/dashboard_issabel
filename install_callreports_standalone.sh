@@ -2440,7 +2440,7 @@ EOF
 }
 
 # Create JavaScript file
-create_javascript_file_part1() {
+create_javascript_file() {
     print_status "Creando dashboard.js..."
     
     cat > "$DASHBOARD_DIR/assets/js/dashboard.js" << 'EOF'
