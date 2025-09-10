@@ -750,6 +750,497 @@ EOF
     
     print_success "Clase CallReports creada"
 }
+# Create API for dashboard data
+create_dashboard_data_api() {
+    print_status "Creando API dashboard-data.php..."
+    
+    cat > "$DASHBOARD_DIR/api/dashboard-data.php" << 'EOF'
+<?php
+/**
+ * Dashboard Data API
+ * Returns comprehensive dashboard statistics
+ */
+
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type');
+
+// Handle preflight OPTIONS request
+if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+    exit(0);
+}
+
+require_once '../includes/CallReports.class.php';
+
+try {
+    $callReports = new CallReports();
+    
+    // Get parameters
+    $dateStart = $_GET['date_start'] ?? date('Y-m-d 00:00:00', strtotime('-30 days'));
+    $dateEnd = $_GET['date_end'] ?? date('Y-m-d 23:59:59');
+    $extension = $_GET['extension'] ?? '';
+    
+    // Validate date format
+    if (!DateTime::createFromFormat('Y-m-d H:i:s', $dateStart) || 
+        !DateTime::createFromFormat('Y-m-d H:i:s', $dateEnd)) {
+        throw new Exception('Invalid date format. Use Y-m-d H:i:s');
+    }
+    
+    // Validate date range (not more than 1 year)
+    $start = new DateTime($dateStart);
+    $end = new DateTime($dateEnd);
+    $interval = $start->diff($end);
+    if ($interval->days > 365) {
+        throw new Exception('Date range cannot exceed 365 days');
+    }
+    
+    // Sanitize extension
+    $extension = Settings::sanitizeInput($extension);
+    
+    // Get all dashboard data
+    $data = [
+        'status' => 'success',
+        'timestamp' => time(),
+        'date_range' => [
+            'start' => $dateStart,
+            'end' => $dateEnd,
+            'extension' => $extension
+        ],
+        'call_summary' => $callReports->getCallSummary($dateStart, $dateEnd, $extension),
+        'hourly_distribution' => $callReports->getHourlyDistribution($dateStart, $dateEnd, $extension),
+        'daily_trends' => $callReports->getDailyTrends($dateStart, $dateEnd, $extension),
+        'extension_stats' => $callReports->getExtensionStats($dateStart, $dateEnd, $extension),
+        'top_destinations' => $callReports->getTopDestinations($dateStart, $dateEnd, $extension)
+    ];
+    
+    echo json_encode($data, JSON_PRETTY_PRINT);
+
+} catch (Exception $e) {
+    http_response_code(400);
+    echo json_encode([
+        'status' => 'error',
+        'message' => $e->getMessage(),
+        'timestamp' => time()
+    ]);
+}
+?>
+EOF
+
+    print_success "API dashboard-data.php creada"
+}
+
+# Create API for call details
+create_call_details_api() {
+    print_status "Creando API call-details.php..."
+    
+    cat > "$DASHBOARD_DIR/api/call-details.php" << 'EOF'
+<?php
+/**
+ * Call Details API
+ * Returns detailed call records with pagination
+ */
+
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type');
+
+if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+    exit(0);
+}
+
+require_once '../includes/CallReports.class.php';
+
+try {
+    $callReports = new CallReports();
+    
+    // Get parameters
+    $dateStart = $_GET['date_start'] ?? date('Y-m-d 00:00:00', strtotime('-7 days'));
+    $dateEnd = $_GET['date_end'] ?? date('Y-m-d 23:59:59');
+    $extension = $_GET['extension'] ?? '';
+    $limit = min(max((int)($_GET['limit'] ?? 100), 1), 1000); // Between 1 and 1000
+    $offset = max((int)($_GET['offset'] ?? 0), 0);
+    
+    // Validate dates
+    if (!DateTime::createFromFormat('Y-m-d H:i:s', $dateStart) || 
+        !DateTime::createFromFormat('Y-m-d H:i:s', $dateEnd)) {
+        throw new Exception('Invalid date format. Use Y-m-d H:i:s');
+    }
+    
+    // Sanitize extension
+    $extension = Settings::sanitizeInput($extension);
+    
+    // Get call details
+    $callDetails = $callReports->getCallDetails($dateStart, $dateEnd, $extension, $limit, $offset);
+    
+    // Calculate total count for pagination (optional, expensive query)
+    $totalCount = null;
+    if (isset($_GET['include_total']) && $_GET['include_total'] == '1') {
+        // This is an expensive operation, only do it when explicitly requested
+        $db = Database::getInstance();
+        $countParams = [$dateStart, $dateEnd];
+        $extensionWhere = '';
+        
+        if (!empty($extension)) {
+            $extensionWhere = ' AND (src = ? OR dst = ?)';
+            $countParams[] = $extension;
+            $countParams[] = $extension;
+        }
+        
+        $countSql = "SELECT COUNT(*) FROM cdr WHERE calldate BETWEEN ? AND ? $extensionWhere";
+        $totalCount = $db->fetchColumn($countSql, $countParams);
+    }
+    
+    $response = [
+        'status' => 'success',
+        'timestamp' => time(),
+        'pagination' => [
+            'limit' => $limit,
+            'offset' => $offset,
+            'returned_records' => count($callDetails),
+            'total_count' => $totalCount
+        ],
+        'filters' => [
+            'date_start' => $dateStart,
+            'date_end' => $dateEnd,
+            'extension' => $extension
+        ],
+        'data' => $callDetails
+    ];
+    
+    echo json_encode($response, JSON_PRETTY_PRINT);
+
+} catch (Exception $e) {
+    http_response_code(400);
+    echo json_encode([
+        'status' => 'error',
+        'message' => $e->getMessage(),
+        'timestamp' => time()
+    ]);
+}
+?>
+EOF
+
+    print_success "API call-details.php creada"
+}
+
+# Create API for real-time data
+create_realtime_api() {
+    print_status "Creando API real-time.php..."
+    
+    cat > "$DASHBOARD_DIR/api/real-time.php" << 'EOF'
+<?php
+/**
+ * Real-time Data API
+ * Returns current system status and active calls
+ */
+
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type');
+
+if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+    exit(0);
+}
+
+require_once '../includes/CallReports.class.php';
+
+try {
+    $callReports = new CallReports();
+    $db = Database::getInstance();
+    
+    // Get current active calls (calls in progress)
+    // Note: This is a simplified approach. In production, you'd query active channels
+    $activeCalls = [
+        'total_active' => 0,
+        'inbound' => 0,
+        'outbound' => 0,
+        'internal' => 0
+    ];
+    
+    // Get recent activity (last hour)
+    $lastHour = date('Y-m-d H:i:s', strtotime('-1 hour'));
+    $now = date('Y-m-d H:i:s');
+    
+    $recentStats = $callReports->getCallSummary($lastHour, $now);
+    
+    // Get system status
+    $systemStatus = [
+        'database_status' => $db->isConnected() ? 'connected' : 'disconnected',
+        'last_call_time' => null,
+        'calls_last_hour' => $recentStats['total_calls'] ?? 0,
+        'answered_last_hour' => $recentStats['answered_calls'] ?? 0
+    ];
+    
+    // Get timestamp of last call
+    $lastCallSql = "SELECT MAX(calldate) as last_call FROM cdr";
+    $lastCall = $db->fetchRow($lastCallSql);
+    if ($lastCall && $lastCall['last_call']) {
+        $systemStatus['last_call_time'] = $lastCall['last_call'];
+        $systemStatus['last_call_ago'] = time() - strtotime($lastCall['last_call']);
+    }
+    
+    // Get queue statistics (if queue_log table exists)
+    $queueStats = [];
+    try {
+        $queueSql = "SELECT 
+                        queuename,
+                        COUNT(CASE WHEN event = 'COMPLETECALLER' THEN 1 END) as completed_calls,
+                        COUNT(CASE WHEN event = 'ABANDON' THEN 1 END) as abandoned_calls,
+                        AVG(CASE WHEN event = 'COMPLETECALLER' THEN CAST(data1 AS UNSIGNED) END) as avg_hold_time
+                     FROM queue_log 
+                     WHERE time > UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 1 DAY))
+                     GROUP BY queuename
+                     HAVING (completed_calls + abandoned_calls) > 0
+                     ORDER BY completed_calls DESC
+                     LIMIT 10";
+        
+        $queueStats = $db->fetchAll($queueSql);
+    } catch (Exception $e) {
+        // queue_log table might not exist or might not be accessible
+        $queueStats = [];
+    }
+    
+    $response = [
+        'status' => 'success',
+        'timestamp' => time(),
+        'server_time' => date('Y-m-d H:i:s'),
+        'active_calls' => $activeCalls,
+        'system_status' => $systemStatus,
+        'recent_activity' => $recentStats,
+        'queue_stats' => $queueStats
+    ];
+    
+    echo json_encode($response, JSON_PRETTY_PRINT);
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'status' => 'error',
+        'message' => $e->getMessage(),
+        'timestamp' => time()
+    ]);
+}
+?>
+EOF
+
+    print_success "API real-time.php creada"
+}
+
+# Create API for data export
+create_export_api() {
+    print_status "Creando API export.php..."
+    
+    cat > "$DASHBOARD_DIR/api/export.php" << 'EOF'
+<?php
+/**
+ * Export API
+ * Exports call data in various formats
+ */
+
+require_once '../includes/CallReports.class.php';
+
+try {
+    $callReports = new CallReports();
+    
+    // Get parameters
+    $dateStart = $_POST['date_start'] ?? $_GET['date_start'] ?? date('Y-m-d 00:00:00', strtotime('-30 days'));
+    $dateEnd = $_POST['date_end'] ?? $_GET['date_end'] ?? date('Y-m-d 23:59:59');
+    $extension = $_POST['extension'] ?? $_GET['extension'] ?? '';
+    $format = strtolower($_POST['format'] ?? $_GET['format'] ?? 'csv');
+    $maxRecords = min((int)($_POST['max_records'] ?? $_GET['max_records'] ?? 5000), 10000);
+    
+    // Validate format
+    if (!in_array($format, ['csv', 'json'])) {
+        throw new Exception('Invalid format. Supported: csv, json');
+    }
+    
+    // Validate dates
+    if (!DateTime::createFromFormat('Y-m-d H:i:s', $dateStart) || 
+        !DateTime::createFromFormat('Y-m-d H:i:s', $dateEnd)) {
+        throw new Exception('Invalid date format. Use Y-m-d H:i:s');
+    }
+    
+    // Sanitize extension
+    $extension = Settings::sanitizeInput($extension);
+    
+    // Get data
+    $callDetails = $callReports->getCallDetails($dateStart, $dateEnd, $extension, $maxRecords, 0);
+    
+    if (empty($callDetails)) {
+        throw new Exception('No data found for the specified criteria');
+    }
+    
+    $filename = 'call_reports_' . date('Y-m-d_H-i-s');
+    
+    if ($format === 'csv') {
+        // CSV Export
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
+        header('Cache-Control: no-cache, must-revalidate');
+        header('Expires: Sat, 26 Jul 1997 05:00:00 GMT');
+        
+        // Open output stream
+        $output = fopen('php://output', 'w');
+        
+        // UTF-8 BOM for Excel compatibility
+        fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
+        
+        // CSV Headers
+        $headers = [
+            'Date/Time', 'Caller ID', 'Source', 'Destination', 
+            'Context', 'Channel', 'Duration', 'Billable Duration', 
+            'Disposition', 'Unique ID'
+        ];
+        fputcsv($output, $headers, Settings::CSV_DELIMITER, Settings::CSV_ENCLOSURE);
+        
+        // CSV Data
+        foreach ($callDetails as $call) {
+            $row = [
+                $call['calldate'],
+                $call['clid'],
+                $call['src'],
+                $call['dst'],
+                $call['dcontext'],
+                $call['channel'],
+                $call['duration_formatted'],
+                $call['billsec_formatted'],
+                $call['disposition'],
+                $call['uniqueid']
+            ];
+            fputcsv($output, $row, Settings::CSV_DELIMITER, Settings::CSV_ENCLOSURE);
+        }
+        
+        fclose($output);
+        
+    } else if ($format === 'json') {
+        // JSON Export
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '.json"');
+        header('Cache-Control: no-cache, must-revalidate');
+        header('Expires: Sat, 26 Jul 1997 05:00:00 GMT');
+        
+        $exportData = [
+            'export_info' => [
+                'generated_at' => date('Y-m-d H:i:s'),
+                'date_range' => [
+                    'start' => $dateStart,
+                    'end' => $dateEnd
+                ],
+                'extension_filter' => $extension,
+                'format' => $format,
+                'total_records' => count($callDetails)
+            ],
+            'call_data' => $callDetails
+        ];
+        
+        echo json_encode($exportData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    }
+
+} catch (Exception $e) {
+    // If headers not sent yet, send error response
+    if (!headers_sent()) {
+        header('Content-Type: application/json');
+        http_response_code(400);
+        echo json_encode([
+            'status' => 'error',
+            'message' => $e->getMessage(),
+            'timestamp' => time()
+        ]);
+    } else {
+        // Headers already sent, log error
+        error_log("Export error: " . $e->getMessage());
+    }
+}
+?>
+EOF
+
+    print_success "API export.php creada"
+}
+
+# Create API index/documentation
+create_api_index() {
+    print_status "Creando documentación de APIs..."
+    
+    cat > "$DASHBOARD_DIR/api/index.php" << 'EOF'
+<?php
+/**
+ * API Documentation and Health Check
+ */
+
+header('Content-Type: application/json');
+
+$apis = [
+    'dashboard-data.php' => [
+        'description' => 'Get comprehensive dashboard statistics',
+        'method' => 'GET',
+        'parameters' => [
+            'date_start' => 'Start date (Y-m-d H:i:s format)',
+            'date_end' => 'End date (Y-m-d H:i:s format)', 
+            'extension' => 'Filter by extension (optional)'
+        ]
+    ],
+    'call-details.php' => [
+        'description' => 'Get detailed call records with pagination',
+        'method' => 'GET',
+        'parameters' => [
+            'date_start' => 'Start date (Y-m-d H:i:s format)',
+            'date_end' => 'End date (Y-m-d H:i:s format)',
+            'extension' => 'Filter by extension (optional)',
+            'limit' => 'Records per page (1-1000, default: 100)',
+            'offset' => 'Pagination offset (default: 0)',
+            'include_total' => 'Include total count (1/0, default: 0)'
+        ]
+    ],
+    'real-time.php' => [
+        'description' => 'Get real-time system status and activity',
+        'method' => 'GET',
+        'parameters' => []
+    ],
+    'export.php' => [
+        'description' => 'Export call data in various formats',
+        'method' => 'POST',
+        'parameters' => [
+            'date_start' => 'Start date (Y-m-d H:i:s format)',
+            'date_end' => 'End date (Y-m-d H:i:s format)',
+            'extension' => 'Filter by extension (optional)',
+            'format' => 'Export format (csv/json)',
+            'max_records' => 'Maximum records (default: 5000, max: 10000)'
+        ]
+    ]
+];
+
+// Test database connection
+try {
+    require_once '../includes/CallReports.class.php';
+    $callReports = new CallReports();
+    $dbStatus = $callReports->testConnection() ? 'connected' : 'disconnected';
+} catch (Exception $e) {
+    $dbStatus = 'error: ' . $e->getMessage();
+}
+
+$response = [
+    'status' => 'ok',
+    'timestamp' => time(),
+    'dashboard_version' => '2.0.0',
+    'database_status' => $dbStatus,
+    'available_apis' => $apis,
+    'example_urls' => [
+        'Dashboard Data' => '../api/dashboard-data.php?date_start=' . date('Y-m-d 00:00:00', strtotime('-7 days')) . '&date_end=' . date('Y-m-d 23:59:59'),
+        'Call Details' => '../api/call-details.php?limit=10',
+        'Real-time Status' => '../api/real-time.php',
+        'Export CSV' => '../api/export.php (POST method)'
+    ]
+];
+
+echo json_encode($response, JSON_PRETTY_PRINT);
+?>
+EOF
+
+    print_success "Documentación de APIs creada"
+}
 # Create main dashboard HTML file
 create_main_html() {
     print_status "Creando index.html principal..."
@@ -1560,22 +2051,7 @@ body {
 }
 
 .data-table th:hover {
-    background-color: #e9ecef;
-}
-
-.data-table td {
-    padding: 12px;
-    border-bottom: 1px solid #dee2e6;
-    transition: background-color 0.2s ease;
-}
-
-.data-table tbody tr:hover {
-    background-color: var(--light-color);
-}
-
-.loading-cell {
-    text-align: center;
-    color: #666;
+     color: #666;
     font-style: italic;
     padding: 40px !important;
 }
@@ -1646,7 +2122,22 @@ body {
 }
 
 .modal-content {
-    background: white;
+    b  background-color: #e9ecef;
+}
+
+.data-table td {
+    padding: 12px;
+    border-bottom: 1px solid #dee2e6;
+    transition: background-color 0.2s ease;
+}
+
+.data-table tbody tr:hover {
+    background-color: var(--light-color);
+}
+
+.loading-cell {
+    text-align: center;
+ ackground: white;
     border-radius: var(--border-radius);
     max-width: 500px;
     width: 90%;
@@ -1663,12 +2154,6 @@ body {
     justify-content: space-between;
     align-items: center;
 }
-# Completar el archivo CSS que está cortado
-complete_css_file() {
-    print_status "Completando dashboard.css..."
-    
-    cat >> "$DASHBOARD_DIR/assets/css/dashboard.css" << 'EOF'
-
 .modal-close {
     cursor: pointer;
     font-size: 28px;
@@ -1954,18 +2439,9 @@ EOF
     print_success "Archivo dashboard.css completado correctamente"
 }
 
-# Función para verificar si el CSS está completo
-verify_css_completeness() {
-    if ! grep -q "prefers-color-scheme: dark" "$DASHBOARD_DIR/assets/css/dashboard.css"; then
-        print_warning "CSS incompleto detectado, completando..."
-        complete_css_file
-    else
-        print_status "CSS ya está completo"
-    fi
-}
-# Create JavaScript file - Complete Part 1
+# Create JavaScript file
 create_javascript_file_part1() {
-    print_status "Creando dashboard.js (Primera mitad)..."
+    print_status "Creando dashboard.js..."
     
     cat > "$DASHBOARD_DIR/assets/js/dashboard.js" << 'EOF'
 /**
@@ -2339,17 +2815,7 @@ const dashboard = {
             this.state.charts.hourly.update();
         }
     },
-EOF
-
-    print_success "Primera mitad del archivo JavaScript creada"
-}
-# Create JavaScript file - Complete Part 2
-create_javascript_file_part2() {
-    print_status "Completando dashboard.js (Segunda mitad)..."
-    
-    cat >> "$DASHBOARD_DIR/assets/js/dashboard.js" << 'EOF'
-
-    // Update data tables
+	    // Update data tables
     updateTables(data) {
         if (data.top_destinations) {
             this.updateDestinationsTable(data.top_destinations);
@@ -2859,7 +3325,6 @@ console.log('%c Call Reports Dashboard v2.0.0 ', 'background: linear-gradient(13
 console.log('Dashboard initialized successfully. Use window.dashboard to access the API.');
 EOF
 
-    print_success "Segunda mitad del archivo JavaScript completada"
     print_success "Archivo dashboard.js completo creado exitosamente"
 }
 # Set proper permissions and security
@@ -4444,15 +4909,14 @@ main_install() {
     # Create frontend
     create_main_html
     create_css_stylesheet
-    create_javascript_file_part1
-    create_javascript_file_part2
+    create_javascript_file
     
     # Configuration and security
     configure_permissions
     configure_web_server
     create_log_files
     
-    # Additional functions (desde Bloque 7)
+    # Additional functions
     create_utility_functions
     create_documentation
     
