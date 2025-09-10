@@ -3323,3 +3323,1098 @@ window.dashboard = dashboard;
 // Console welcome message
 console.log('%c Call Reports Dashboard v2.0.0 ', 'background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 10px; border-radius: 5px; font-weight: bold;');
 console.log('Dashboard initialized successfully. Use window.dashboard to access the API.');
+
+EOF
+
+    print_success "Archivo dashboard.js completo creado exitosamente"
+}
+# Create CSS and JavaScript files from artifacts
+create_frontend_files() {
+    print_status "Creando archivos CSS y JavaScript del frontend..."
+    
+    # Note: CSS and JavaScript content should be copied from the artifacts
+    # dashboard_css and dashboard_js created separately
+    
+    # Create placeholder files - these will be populated with artifact content
+    touch "$DASHBOARD_DIR/assets/css/dashboard.css"
+    touch "$DASHBOARD_DIR/assets/js/dashboard.js"
+    
+    # Set proper permissions for frontend files
+    chmod 644 "$DASHBOARD_DIR/assets/css/dashboard.css"
+    chmod 644 "$DASHBOARD_DIR/assets/js/dashboard.js"
+    
+    print_status "Archivos frontend creados (CSS y JS deben copiarse de los artefactos)"
+}
+
+# Set proper permissions and security
+configure_permissions() {
+    print_status "Configurando permisos y seguridad..."
+    
+    # Set ownership to web server user
+    if command -v apache2 &> /dev/null || systemctl is-active --quiet apache2; then
+        WEB_USER="www-data"
+        WEB_GROUP="www-data"
+    elif command -v httpd &> /dev/null || systemctl is-active --quiet httpd; then
+        WEB_USER="apache"
+        WEB_GROUP="apache"
+    else
+        WEB_USER="nginx"
+        WEB_GROUP="nginx"
+    fi
+    
+    print_status "Configurando ownership para usuario web: $WEB_USER:$WEB_GROUP"
+    
+    # Set ownership
+    chown -R "$WEB_USER:$WEB_GROUP" "$DASHBOARD_DIR"
+    
+    # Set directory permissions
+    find "$DASHBOARD_DIR" -type d -exec chmod 755 {} \;
+    
+    # Set file permissions
+    find "$DASHBOARD_DIR" -type f -exec chmod 644 {} \;
+    
+    # Set special permissions for writable directories
+    chmod -R 777 "$DASHBOARD_DIR"/{data,logs,reports}
+    
+    # Secure sensitive files
+    chmod 600 "$DASHBOARD_DIR/config/database.php"
+    
+    # Create .htaccess for Apache security
+    create_htaccess_security
+    
+    # Create basic security headers
+    create_security_headers
+    
+    print_success "Permisos configurados correctamente"
+}
+
+# Create .htaccess security file
+create_htaccess_security() {
+    print_status "Creando configuración de seguridad Apache..."
+    
+    cat > "$DASHBOARD_DIR/.htaccess" << 'EOF'
+# Call Reports Dashboard - Security Configuration
+# Disable server signature
+ServerSignature Off
+
+# Prevent access to sensitive files
+<FilesMatch "(\.htaccess|\.htpasswd|\.ini|\.log|\.sql|\.conf|\.bak|\.backup)$">
+    Require all denied
+</FilesMatch>
+
+# Protect config directory
+<Directory "config">
+    Require all denied
+</Directory>
+
+# Protect logs directory from direct access
+<Directory "logs">
+    Require all denied
+</Directory>
+
+# Enable security headers
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options DENY
+    Header always set X-Content-Type-Options nosniff
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+</IfModule>
+
+# Enable compression
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript application/javascript application/json
+</IfModule>
+
+# Browser caching for static assets
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+    ExpiresByType image/png "access plus 1 month"
+    ExpiresByType image/jpg "access plus 1 month"
+    ExpiresByType image/jpeg "access plus 1 month"
+    ExpiresByType image/gif "access plus 1 month"
+    ExpiresByType image/svg+xml "access plus 1 month"
+</IfModule>
+
+# Prevent PHP execution in uploads directory
+<Directory "data">
+    php_flag engine off
+</Directory>
+
+# Rate limiting (if mod_security is available)
+<IfModule mod_security.c>
+    SecAction "id:1001,phase:1,nolog,pass,initcol:ip=%{REMOTE_ADDR},setvar:ip.requests=+1,expirevar:ip.requests=60"
+    SecRule IP:REQUESTS "@gt 60" "id:1002,phase:1,deny,status:429,msg:'Rate limit exceeded'"
+</IfModule>
+EOF
+
+    print_success "Configuración de seguridad Apache creada"
+}
+
+# Create security headers for different web servers
+create_security_headers() {
+    print_status "Creando archivo de configuración de seguridad..."
+    
+    cat > "$DASHBOARD_DIR/config/security.php" << 'EOF'
+<?php
+/**
+ * Security Configuration and Headers
+ * Applied to all dashboard pages
+ */
+
+// Prevent direct access
+if (!defined('DASHBOARD_ACCESS')) {
+    http_response_code(403);
+    exit('Direct access forbidden');
+}
+
+// Set security headers
+function setSecurityHeaders() {
+    // Prevent clickjacking
+    header('X-Frame-Options: DENY');
+    
+    // Prevent MIME type sniffing
+    header('X-Content-Type-Options: nosniff');
+    
+    // Enable XSS protection
+    header('X-XSS-Protection: 1; mode=block');
+    
+    // Referrer policy
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    
+    // Content Security Policy
+    $csp = "default-src 'self'; " .
+           "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; " .
+           "style-src 'self' 'unsafe-inline'; " .
+           "img-src 'self' data:; " .
+           "font-src 'self'; " .
+           "connect-src 'self'; " .
+           "frame-ancestors 'none';";
+    header("Content-Security-Policy: $csp");
+    
+    // Remove server information
+    header_remove('Server');
+    header_remove('X-Powered-By');
+    
+    // Cache control for API responses
+    if (strpos($_SERVER['REQUEST_URI'], '/api/') !== false) {
+        header('Cache-Control: no-cache, no-store, must-revalidate');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+    }
+}
+
+// Rate limiting function
+function checkRateLimit($maxRequests = 60, $timeWindow = 60) {
+    $ip = $_SERVER['REMOTE_ADDR'];
+    $cacheFile = dirname(__DIR__) . "/data/rate_limit_" . md5($ip) . ".cache";
+    
+    $currentTime = time();
+    $requests = [];
+    
+    // Load existing requests
+    if (file_exists($cacheFile)) {
+        $data = file_get_contents($cacheFile);
+        $requests = json_decode($data, true) ?: [];
+    }
+    
+    // Clean old requests
+    $requests = array_filter($requests, function($timestamp) use ($currentTime, $timeWindow) {
+        return ($currentTime - $timestamp) < $timeWindow;
+    });
+    
+    // Check if limit exceeded
+    if (count($requests) >= $maxRequests) {
+        http_response_code(429);
+        header('Retry-After: ' . $timeWindow);
+        echo json_encode(['error' => 'Rate limit exceeded']);
+        exit;
+    }
+    
+    // Add current request
+    $requests[] = $currentTime;
+    file_put_contents($cacheFile, json_encode($requests));
+}
+
+// Input validation function
+function validateInput($input, $type = 'string', $maxLength = 255) {
+    if ($input === null || $input === '') {
+        return '';
+    }
+    
+    // Remove null bytes
+    $input = str_replace("\0", '', $input);
+    
+    switch ($type) {
+        case 'email':
+            return filter_var($input, FILTER_VALIDATE_EMAIL) ? $input : '';
+        case 'int':
+            return filter_var($input, FILTER_VALIDATE_INT) !== false ? (int)$input : 0;
+        case 'float':
+            return filter_var($input, FILTER_VALIDATE_FLOAT) !== false ? (float)$input : 0.0;
+        case 'datetime':
+            $date = DateTime::createFromFormat('Y-m-d H:i:s', $input);
+            return $date ? $date->format('Y-m-d H:i:s') : '';
+        case 'extension':
+            // Allow only numeric extensions (3-4 digits)
+            return preg_match('/^[0-9]{3,4}$/', $input) ? $input : '';
+        default:
+            // String validation
+            $input = trim($input);
+            $input = substr($input, 0, $maxLength);
+            return htmlspecialchars($input, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+// Log security events
+function logSecurityEvent($event, $details = []) {
+    $logFile = dirname(__DIR__) . '/logs/security.log';
+    $logEntry = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'ip' => $_SERVER['REMOTE_ADDR'],
+        'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+        'event' => $event,
+        'details' => $details
+    ];
+    
+    file_put_contents($logFile, json_encode($logEntry) . "\n", FILE_APPEND | LOCK_EX);
+}
+?>
+EOF
+
+    print_success "Configuración de seguridad creada"
+}
+
+# Configure web server specific settings
+configure_web_server() {
+    print_status "Configurando servidor web..."
+    
+    # Detect web server
+    if systemctl is-active --quiet apache2 || systemctl is-active --quiet httpd; then
+        configure_apache_server
+    elif systemctl is-active --quiet nginx; then
+        configure_nginx_server
+    else
+        print_warning "Servidor web no detectado automáticamente"
+    fi
+}
+
+# Configure Apache specific settings
+configure_apache_server() {
+    print_status "Configurando Apache para el dashboard..."
+    
+    # Create virtual host configuration (optional)
+    if [ "$VHOST_PORT" != "80" ] && [ "$VHOST_PORT" != "443" ]; then
+        create_apache_vhost
+    fi
+    
+    # Reload Apache configuration
+    if systemctl is-active --quiet apache2; then
+        systemctl reload apache2
+        print_success "Apache2 recargado"
+    elif systemctl is-active --quiet httpd; then
+        systemctl reload httpd
+        print_success "Apache HTTPD recargado"
+    fi
+}
+
+# Create Apache virtual host
+create_apache_vhost() {
+    print_status "Creando virtual host Apache en puerto $VHOST_PORT..."
+    
+    VHOST_FILE="/etc/apache2/sites-available/callreports-dashboard.conf"
+    if [ -d "/etc/httpd/conf.d" ]; then
+        VHOST_FILE="/etc/httpd/conf.d/callreports-dashboard.conf"
+    fi
+    
+    cat > "$VHOST_FILE" << EOF
+# Call Reports Dashboard Virtual Host
+<VirtualHost *:$VHOST_PORT>
+    DocumentRoot $DASHBOARD_DIR
+    ServerName callreports.local
+    
+    <Directory $DASHBOARD_DIR>
+        AllowOverride All
+        Require all granted
+        Options -Indexes +FollowSymLinks
+        
+        # Enable rewrite engine
+        RewriteEngine On
+        
+        # Redirect root to index.html
+        RewriteRule ^/?$ /index.html [L,R=301]
+    </Directory>
+    
+    # Security headers
+    Header always set X-Frame-Options DENY
+    Header always set X-Content-Type-Options nosniff
+    Header always set X-XSS-Protection "1; mode=block"
+    
+    # Logging
+    ErrorLog \${APACHE_LOG_DIR}/callreports_error.log
+    CustomLog \${APACHE_LOG_DIR}/callreports_access.log combined
+</VirtualHost>
+
+# Listen on custom port if not 80
+Listen $VHOST_PORT
+EOF
+
+    # Enable site if using Apache2
+    if command -v a2ensite &> /dev/null; then
+        a2ensite callreports-dashboard.conf
+        print_status "Virtual host habilitado en Apache2"
+    fi
+    
+    print_success "Virtual host creado: http://localhost:$VHOST_PORT"
+}
+# Verify installation
+verify_installation() {
+    print_status "Verificando instalación del dashboard..."
+    
+    local errors=0
+    local warnings=0
+    
+    # Check directory structure
+    print_status "Verificando estructura de directorios..."
+    required_dirs=(
+        "$DASHBOARD_DIR"
+        "$DASHBOARD_DIR/api"
+        "$DASHBOARD_DIR/assets/css"
+        "$DASHBOARD_DIR/assets/js"
+        "$DASHBOARD_DIR/config"
+        "$DASHBOARD_DIR/includes"
+        "$DASHBOARD_DIR/data"
+        "$DASHBOARD_DIR/logs"
+        "$DASHBOARD_DIR/reports"
+    )
+    
+    for dir in "${required_dirs[@]}"; do
+        if [ ! -d "$dir" ]; then
+            print_error "Directorio faltante: $dir"
+            ((errors++))
+        fi
+    done
+    
+    # Check essential files
+    print_status "Verificando archivos esenciales..."
+    essential_files=(
+        "$DASHBOARD_DIR/index.html"
+        "$DASHBOARD_DIR/assets/css/dashboard.css"
+        "$DASHBOARD_DIR/assets/js/dashboard.js"
+        "$DASHBOARD_DIR/config/database.php"
+        "$DASHBOARD_DIR/config/settings.php"
+        "$DASHBOARD_DIR/includes/Database.class.php"
+        "$DASHBOARD_DIR/includes/CallReports.class.php"
+        "$DASHBOARD_DIR/api/dashboard-data.php"
+        "$DASHBOARD_DIR/api/call-details.php"
+        "$DASHBOARD_DIR/api/real-time.php"
+        "$DASHBOARD_DIR/api/export.php"
+    )
+    
+    for file in "${essential_files[@]}"; do
+        if [ ! -f "$file" ]; then
+            print_error "Archivo esencial faltante: $file"
+            ((errors++))
+        fi
+    done
+    
+    # Check file permissions
+    print_status "Verificando permisos..."
+    if [ ! -w "$DASHBOARD_DIR/data" ]; then
+        print_error "Directorio data no es escribible"
+        ((errors++))
+    fi
+    
+    if [ ! -w "$DASHBOARD_DIR/logs" ]; then
+        print_error "Directorio logs no es escribible"
+        ((errors++))
+    fi
+    
+    # Test database connection
+    print_status "Verificando conexión a base de datos..."
+    if ! mysql -h"$DB_HOST" -u"$DB_USER_NAME" -p"$DB_USER_PASS" -e "SELECT 1 FROM $CDR_DB.cdr LIMIT 1;" &>/dev/null; then
+        print_error "No se puede conectar a la base de datos CDR con el usuario del dashboard"
+        ((errors++))
+    fi
+    
+    # Test API endpoints
+    print_status "Verificando APIs..."
+    if command -v curl &> /dev/null; then
+        api_base="http://localhost/$(basename "$DASHBOARD_DIR")/api"
+        
+        if ! curl -s "$api_base/index.php" | grep -q "dashboard_version"; then
+            print_warning "API no responde correctamente (esto puede ser normal si el servidor web no está configurado)"
+            ((warnings++))
+        fi
+    else
+        print_warning "curl no disponible, no se pueden probar las APIs"
+        ((warnings++))
+    fi
+    
+    # Check web server access
+    print_status "Verificando acceso web..."
+    if [ ! -r "$DASHBOARD_DIR/index.html" ]; then
+        print_error "Archivo index.html no es legible por el servidor web"
+        ((errors++))
+    fi
+    
+    # Summary
+    echo
+    if [ $errors -eq 0 ]; then
+        print_success "✅ Verificación de instalación completada exitosamente"
+        if [ $warnings -gt 0 ]; then
+            print_warning "⚠️  Se encontraron $warnings advertencias (revisables)"
+        fi
+        return 0
+    else
+        print_error "❌ Verificación falló con $errors errores y $warnings advertencias"
+        return 1
+    fi
+}
+
+# Test dashboard functionality
+test_dashboard_functionality() {
+    print_status "Ejecutando pruebas de funcionalidad..."
+    
+    # Test PHP syntax
+    if command -v php &> /dev/null; then
+        print_status "Verificando sintaxis PHP..."
+        
+        php_files=(
+            "$DASHBOARD_DIR/config/database.php"
+            "$DASHBOARD_DIR/includes/Database.class.php"
+            "$DASHBOARD_DIR/includes/CallReports.class.php"
+            "$DASHBOARD_DIR/api/dashboard-data.php"
+        )
+        
+        for file in "${php_files[@]}"; do
+            if ! php -l "$file" &>/dev/null; then
+                print_error "Error de sintaxis en: $file"
+                return 1
+            fi
+        done
+        
+        print_success "Sintaxis PHP verificada"
+    fi
+    
+    # Test database classes
+    print_status "Probando clases de base de datos..."
+    
+    cat > "/tmp/test_dashboard_db.php" << EOF
+<?php
+define('DASHBOARD_ACCESS', true);
+require_once '$DASHBOARD_DIR/includes/CallReports.class.php';
+
+try {
+    \$callReports = new CallReports();
+    if (\$callReports->testConnection()) {
+        echo "SUCCESS: Database connection working\n";
+    } else {
+        echo "ERROR: Database connection failed\n";
+        exit(1);
+    }
+} catch (Exception \$e) {
+    echo "ERROR: " . \$e->getMessage() . "\n";
+    exit(1);
+}
+?>
+EOF
+
+    if php "/tmp/test_dashboard_db.php"; then
+        print_success "Clases de base de datos funcionando correctamente"
+    else
+        print_error "Error en las clases de base de datos"
+        return 1
+    fi
+    
+    # Cleanup test file
+    rm -f "/tmp/test_dashboard_db.php"
+    
+    return 0
+}
+
+# Create initial log files
+create_log_files() {
+    print_status "Creando archivos de log iniciales..."
+    
+    # Create log files with proper permissions
+    touch "$DASHBOARD_DIR/logs/error.log"
+    touch "$DASHBOARD_DIR/logs/access.log"
+    touch "$DASHBOARD_DIR/logs/security.log"
+    
+    # Set permissions
+    chmod 666 "$DASHBOARD_DIR/logs"/*.log
+    
+    # Create log rotation configuration
+    cat > "/etc/logrotate.d/callreports-dashboard" << EOF
+$DASHBOARD_DIR/logs/*.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 666 $WEB_USER $WEB_GROUP
+    postrotate
+        # Send HUP signal to web server if needed
+        /bin/systemctl reload apache2 2>/dev/null || /bin/systemctl reload httpd 2>/dev/null || /bin/systemctl reload nginx 2>/dev/null || true
+    endscript
+}
+EOF
+
+    print_success "Archivos de log configurados"
+}
+
+# Rollback function for error recovery
+rollback_installation() {
+    print_warning "Ejecutando rollback de la instalación..."
+    
+    local rollback_errors=0
+    
+    # Remove dashboard directory
+    if [ -d "$DASHBOARD_DIR" ]; then
+        print_status "Removiendo directorio del dashboard..."
+        rm -rf "$DASHBOARD_DIR"
+        if [ $? -eq 0 ]; then
+            print_status "Directorio del dashboard removido"
+        else
+            print_error "Error removiendo directorio del dashboard"
+            ((rollback_errors++))
+        fi
+    fi
+    
+    # Remove database user
+    if [ -n "$DB_USER_NAME" ] && [ -n "$DB_ROOT_USER" ] && [ -n "$DB_ROOT_PASS" ]; then
+        print_status "Removiendo usuario de base de datos..."
+        mysql -h"$DB_HOST" -u"$DB_ROOT_USER" -p"$DB_ROOT_PASS" << SQLEOF 2>/dev/null
+DROP USER IF EXISTS '${DB_USER_NAME}'@'localhost';
+DROP USER IF EXISTS '${DB_USER_NAME}'@'%';
+FLUSH PRIVILEGES;
+SQLEOF
+        if [ $? -eq 0 ]; then
+            print_status "Usuario de base de datos removido"
+        else
+            print_warning "No se pudo remover el usuario de base de datos"
+            ((rollback_errors++))
+        fi
+    fi
+    
+    # Remove virtual host configurations
+    if [ -f "/etc/apache2/sites-available/callreports-dashboard.conf" ]; then
+        a2dissite callreports-dashboard.conf 2>/dev/null
+        rm -f "/etc/apache2/sites-available/callreports-dashboard.conf"
+        systemctl reload apache2 2>/dev/null
+        print_status "Configuración Apache removida"
+    fi
+    
+    if [ -f "/etc/httpd/conf.d/callreports-dashboard.conf" ]; then
+        rm -f "/etc/httpd/conf.d/callreports-dashboard.conf"
+        systemctl reload httpd 2>/dev/null
+        print_status "Configuración HTTPD removida"
+    fi
+    
+    # Remove log rotation
+    if [ -f "/etc/logrotate.d/callreports-dashboard" ]; then
+        rm -f "/etc/logrotate.d/callreports-dashboard"
+        print_status "Configuración de log rotation removida"
+    fi
+    
+    # Restore backup if available
+    if [ -d "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR/$(basename "$DASHBOARD_DIR")" ]; then
+        print_status "Restaurando respaldo anterior..."
+        cp -r "$BACKUP_DIR/$(basename "$DASHBOARD_DIR")" "$(dirname "$DASHBOARD_DIR")/"
+        print_status "Respaldo anterior restaurado"
+    fi
+    
+    if [ $rollback_errors -eq 0 ]; then
+        print_success "Rollback completado exitosamente"
+    else
+        print_warning "Rollback completado con $rollback_errors errores menores"
+    fi
+}
+
+# Uninstall function
+uninstall_dashboard() {
+    print_status "Desinstalando Call Reports Dashboard..."
+    
+    # Confirm uninstallation
+    echo -e "${YELLOW}¿Está seguro de que desea desinstalar completamente el dashboard? (y/N)${NC}"
+    read -r confirm
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_status "Desinstalación cancelada"
+        return 0
+    fi
+    
+    # Use rollback function to clean everything
+    rollback_installation
+    
+    print_success "Call Reports Dashboard desinstalado completamente"
+}
+
+# Display post-installation information
+show_installation_summary() {
+    echo
+    echo -e "${GREEN}
+╔══════════════════════════════════════════════════════════════════╗
+║                    ¡Instalación Completada!                     ║
+║              Call Reports Dashboard v2.0.0 Standalone           ║
+╚══════════════════════════════════════════════════════════════════╝
+${NC}"
+    
+    print_success "Dashboard instalado exitosamente como aplicación independiente"
+    echo
+    echo "📍 UBICACIÓN DEL DASHBOARD:"
+    echo "   Directorio: $DASHBOARD_DIR"
+    echo "   URL Principal: http://$(hostname -I | awk '{print $1}')/$(basename "$DASHBOARD_DIR")/"
+    if [ "$VHOST_PORT" != "80" ]; then
+        echo "   URL Alternativa: http://$(hostname -I | awk '{print $1}'):$VHOST_PORT/"
+    fi
+    echo
+    echo "🔗 ACCESO DIRECTO:"
+    echo "   • Dashboard: http://localhost/$(basename "$DASHBOARD_DIR")/"
+    echo "   • API Documentation: http://localhost/$(basename "$DASHBOARD_DIR")/api/"
+    echo "   • Real-time Data: http://localhost/$(basename "$DASHBOARD_DIR")/api/real-time.php"
+    echo
+    echo "🔧 CONFIGURACIÓN:"
+    echo "   • Base de datos: $CDR_DB en $DB_HOST"
+    echo "   • Usuario BD: $DB_USER_NAME (solo lectura)"
+    echo "   • Logs: $DASHBOARD_DIR/logs/"
+    echo "   • Configuración: $DASHBOARD_DIR/config/"
+    echo
+    echo "📊 CARACTERÍSTICAS:"
+    echo "   ✅ Dashboard interactivo con gráficas Chart.js"
+    echo "   ✅ APIs REST para integración"
+    echo "   ✅ Exportación CSV/JSON"
+    echo "   ✅ Filtros avanzados por fecha y extensión"
+    echo "   ✅ Monitoreo en tiempo real"
+    echo "   ✅ Responsive design para móviles"
+    echo "   ✅ Configuración de seguridad incluida"
+    echo
+    echo "🛠️  COMANDOS ÚTILES:"
+    echo "   • Verificar instalación: $0 verify"
+    echo "   • Desinstalar: $0 uninstall"
+    echo "   • Ver logs: tail -f $DASHBOARD_DIR/logs/error.log"
+    echo "   • Reiniciar servidor web: systemctl reload apache2"
+    echo
+    echo "📁 ARCHIVOS IMPORTANTES:"
+    echo "   • Configuración BD: $DASHBOARD_DIR/config/database.php"
+    echo "   • Configuración general: $DASHBOARD_DIR/config/settings.php"
+    echo "   • Log de instalación: $LOG_FILE"
+    if [ -d "$BACKUP_DIR" ]; then
+        echo "   • Respaldo: $BACKUP_DIR"
+    fi
+    echo
+    echo "🔐 SEGURIDAD:"
+    echo "   ✅ Usuario de BD con permisos limitados (solo SELECT)"
+    echo "   ✅ Validación de entrada y headers de seguridad"
+    echo "   ✅ Rate limiting básico incluido"
+    echo "   ✅ Archivos sensibles protegidos con .htaccess"
+    echo
+    echo "🚀 PRÓXIMOS PASOS:"
+    echo "   1. Copiar contenido del artefacto CSS a: $DASHBOARD_DIR/assets/css/dashboard.css"
+    echo "   2. Copiar contenido del artefacto JavaScript a: $DASHBOARD_DIR/assets/js/dashboard.js"
+    echo "   3. Abrir el dashboard en su navegador"
+    echo "   4. Verificar que los datos CDR se muestren correctamente"
+    echo
+    echo -e "${YELLOW}💡 IMPORTANTE: Recuerde copiar el contenido de los artefactos CSS y JavaScript"
+    echo -e "   creados anteriormente a los archivos correspondientes.${NC}"
+    echo
+    if [ "$VHOST_PORT" != "80" ]; then
+        echo -e "${BLUE}🌐 Para acceso externo, abra el puerto $VHOST_PORT en su firewall:${NC}"
+        echo "   firewall-cmd --permanent --add-port=$VHOST_PORT/tcp"
+        echo "   firewall-cmd --reload"
+        echo
+    fi
+}
+
+# Main installation function
+main_install() {
+    print_header
+    
+    log "Iniciando instalación de Call Reports Dashboard v2.0.0 Standalone"
+    
+    # Pre-installation checks
+    check_root
+    check_requirements
+    
+    # Database configuration
+    get_database_config
+    create_database_user
+    
+    # Create dashboard structure
+    create_dashboard_structure
+    
+    # Create configuration files
+    create_database_config
+    create_settings_config
+    
+    # Create PHP classes
+    create_database_class
+    create_callreports_class
+    
+    # Create APIs
+    create_dashboard_data_api
+    create_call_details_api
+    create_realtime_api
+    create_export_api
+    create_api_index
+    
+    # Create frontend
+    create_main_html
+    create_frontend_files
+    
+    # Configuration and security
+    configure_permissions
+    configure_web_server
+    create_log_files
+    
+    # Testing and verification
+    if test_dashboard_functionality; then
+        print_success "Pruebas de funcionalidad completadas"
+    else
+        print_error "Falló las pruebas de funcionalidad"
+        exit 1
+    fi
+    
+    if verify_installation; then
+        print_success "Verificación de instalación exitosa"
+    else
+        print_error "Falló la verificación de instalación"
+        exit 1
+    fi
+    
+    # Show installation summary
+    show_installation_summary
+    
+    log "Instalación completada exitosamente"
+}
+
+# Show usage information
+show_usage() {
+    echo "Call Reports Dashboard v2.0.0 - Instalador Standalone"
+    echo
+    echo "Uso: $0 [comando] [opciones]"
+    echo
+    echo "Comandos disponibles:"
+    echo "  install     Instalar el dashboard (por defecto)"
+    echo "  uninstall   Desinstalar completamente el dashboard"
+    echo "  verify      Verificar instalación existente"
+    echo "  rollback    Ejecutar rollback manual"
+    echo "  --help, -h  Mostrar esta ayuda"
+    echo
+    echo "Opciones:"
+    echo "  --port=PORT     Puerto para virtual host (default: 8081)"
+    echo "  --dir=DIR       Directorio de instalación personalizado"
+    echo "  --no-vhost      No crear virtual host"
+    echo
+    echo "Ejemplos:"
+    echo "  $0 install                    # Instalación estándar"
+    echo "  $0 install --port=8080        # Instalar en puerto 8080"
+    echo "  $0 verify                     # Verificar instalación"
+    echo "  $0 uninstall                  # Desinstalar completamente"
+    echo
+    echo "El dashboard se instalará como aplicación web independiente que"
+    echo "NO interfiere con Issabel PBX y solo requiere acceso de lectura"
+    echo "a la base de datos CDR."
+}
+# Parse command line arguments
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --port=*)
+                VHOST_PORT="${1#*=}"
+                shift
+                ;;
+            --dir=*)
+                CUSTOM_DIR="${1#*=}"
+                DASHBOARD_DIR="$CUSTOM_DIR"
+                shift
+                ;;
+            --no-vhost)
+                VHOST_PORT="80"
+                shift
+                ;;
+            --help|-h)
+                show_usage
+                exit 0
+                ;;
+            *)
+                # Unknown option
+                print_error "Opción desconocida: $1"
+                show_usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Handle errors and setup trap
+handle_error() {
+    local exit_code=$?
+    print_error "Error detectado en la línea $1. Código de salida: $exit_code"
+    
+    if [ -n "$DASHBOARD_DIR" ] && [ -d "$DASHBOARD_DIR" ]; then
+        echo -e "${YELLOW}¿Desea ejecutar rollback automático? (y/N)${NC}"
+        read -t 10 -r rollback_choice
+        
+        if [[ "$rollback_choice" =~ ^[Yy]$ ]]; then
+            rollback_installation
+        fi
+    fi
+    
+    exit $exit_code
+}
+
+# Initialize environment
+init_environment() {
+    # Set locale
+    export LC_ALL=C
+    
+    # Set umask for secure file creation
+    umask 022
+    
+    # Create lock file to prevent multiple instances
+    LOCK_FILE="/tmp/callreports_install.lock"
+    
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            print_error "Otra instancia del instalador está ejecutándose (PID: $lock_pid)"
+            exit 1
+        fi
+    fi
+    
+    echo $$ > "$LOCK_FILE"
+    
+    # Cleanup lock file on exit
+    trap 'rm -f "$LOCK_FILE"' EXIT
+}
+
+# Cleanup function
+cleanup_installation() {
+    print_status "Ejecutando limpieza post-instalación..."
+    
+    # Remove temporary files
+    rm -f "/tmp/test_dashboard_db.php"
+    rm -f "/tmp/callreports_db_config"
+    
+    # Clean up any test database connections
+    pkill -f "mysql.*$DB_USER_NAME" 2>/dev/null || true
+    
+    # Set final permissions
+    if [ -d "$DASHBOARD_DIR" ]; then
+        # Ensure logs directory is writable
+        chmod 777 "$DASHBOARD_DIR/logs" 2>/dev/null
+        chmod 666 "$DASHBOARD_DIR/logs"/*.log 2>/dev/null
+        
+        # Ensure data directory is writable
+        chmod 777 "$DASHBOARD_DIR/data" 2>/dev/null
+        
+        # Secure config files
+        chmod 600 "$DASHBOARD_DIR/config/database.php" 2>/dev/null
+    fi
+    
+    print_success "Limpieza completada"
+}
+
+# Final security check
+final_security_check() {
+    print_status "Ejecutando verificaciones finales de seguridad..."
+    
+    local security_issues=0
+    
+    # Check file permissions
+    if [ -f "$DASHBOARD_DIR/config/database.php" ]; then
+        local perms=$(stat -c %a "$DASHBOARD_DIR/config/database.php" 2>/dev/null || stat -f %A "$DASHBOARD_DIR/config/database.php" 2>/dev/null)
+        if [ "$perms" != "600" ]; then
+            print_warning "Archivo database.php no tiene permisos seguros (600)"
+            chmod 600 "$DASHBOARD_DIR/config/database.php"
+            ((security_issues++))
+        fi
+    fi
+    
+    # Check for sensitive files in web root
+    sensitive_patterns=("*.sql" "*.bak" "*.backup" "*.conf" "*.ini")
+    for pattern in "${sensitive_patterns[@]}"; do
+        if find "$DASHBOARD_DIR" -name "$pattern" -type f 2>/dev/null | grep -q .; then
+            print_warning "Archivos sensibles encontrados con patrón: $pattern"
+            ((security_issues++))
+        fi
+    done
+    
+    # Test database user permissions
+    if mysql -h"$DB_HOST" -u"$DB_USER_NAME" -p"$DB_USER_PASS" -e "CREATE TABLE test_table (id INT);" "$CDR_DB" &>/dev/null; then
+        print_error "Usuario de BD tiene permisos de escritura (RIESGO DE SEGURIDAD)"
+        mysql -h"$DB_HOST" -u"$DB_USER_NAME" -p"$DB_USER_PASS" -e "DROP TABLE test_table;" "$CDR_DB" &>/dev/null
+        ((security_issues++))
+    else
+        print_success "Usuario de BD tiene permisos limitados correctamente"
+    fi
+    
+    if [ $security_issues -eq 0 ]; then
+        print_success "Verificación de seguridad completada sin problemas"
+    else
+        print_warning "Se encontraron $security_issues problemas de seguridad menores"
+    fi
+}
+
+# Create version and license information
+create_version_info() {
+    print_status "Creando información de versión..."
+    
+    cat > "$DASHBOARD_DIR/VERSION" << 'EOF'
+Call Reports Dashboard
+Version: 2.0.0 Standalone
+Build Date: 2025-01-15
+PHP Minimum: 7.4
+MySQL Minimum: 5.7
+License: GPL v3
+
+Features:
+- Interactive dashboards with Chart.js
+- REST APIs for integration
+- Real-time monitoring
+- CSV/JSON export
+- Responsive design
+- Security headers and rate limiting
+- Independent from Issabel PBX modules
+
+Compatibility:
+- Issabel 4.x
+- FreePBX 15+
+- Asterisk 11.25.3+
+- Apache 2.4+
+- Nginx 1.14+
+- PHP 7.4+
+- MySQL 5.7+ / MariaDB 10.3+
+EOF
+
+    print_success "Información de versión creada"
+}
+
+# Enhanced main installation with all new functions
+main_install_enhanced() {
+    print_header
+    
+    log "Iniciando instalación de Call Reports Dashboard v2.0.0 Standalone"
+    
+    # Initialize environment
+    init_environment
+    
+    # Pre-installation checks
+    check_root
+    check_requirements
+    
+    # Database configuration
+    get_database_config
+    create_database_user
+    
+    # Create dashboard structure
+    create_dashboard_structure
+    
+    # Create configuration files
+    create_database_config
+    create_settings_config
+    
+    # Create PHP classes
+    create_database_class
+    create_callreports_class
+    
+    # Create APIs
+    create_dashboard_data_api
+    create_call_details_api
+    create_realtime_api
+    create_export_api
+    create_api_index
+    
+    # Create frontend
+    create_main_html
+    create_frontend_files
+    
+    # Configuration and security
+    configure_permissions
+    configure_web_server
+    create_log_files
+    
+    # Additional functions
+    create_version_info
+    
+    # Testing and verification
+    if test_dashboard_functionality; then
+        print_success "Pruebas de funcionalidad completadas"
+    else
+        print_error "Falló las pruebas de funcionalidad"
+        exit 1
+    fi
+    
+    if verify_installation; then
+        print_success "Verificación de instalación exitosa"
+    else
+        print_error "Falló la verificación de instalación"
+        exit 1
+    fi
+    
+    # Final steps
+    final_security_check
+    cleanup_installation
+    
+    # Show installation summary
+    show_installation_summary
+    
+    log "Instalación completada exitosamente"
+}
+
+# Set error trap
+trap 'handle_error $LINENO' ERR
+
+# Main execution logic
+case "${1:-install}" in
+    "install")
+        shift
+        parse_arguments "$@"
+        main_install_enhanced
+        ;;
+    "uninstall")
+        check_root
+        uninstall_dashboard
+        ;;
+    "verify")
+        if [ -d "$DASHBOARD_DIR" ]; then
+            verify_installation
+        else
+            print_error "Dashboard no está instalado en $DASHBOARD_DIR"
+            exit 1
+        fi
+        ;;
+    "rollback")
+        check_root
+        rollback_installation
+        ;;
+    "--help"|"-h")
+        show_usage
+        exit 0
+        ;;
+    *)
+        print_error "Comando desconocido: $1"
+        show_usage
+        exit 1
+        ;;
+esac
+
+# Script completion
+print_status "Script finalizado exitosamente"
+exit 0
+
+# End of script - Call Reports Dashboard v2.0.0 Standalone Installer
+# Desarrollado para Issabel 4 - Totalmente independiente del PBX
+# No interfiere con el funcionamiento normal de Issabel
+# 
+# Para más información:
+# - Documentación: http://localhost/callreports/api/
+# - Logs: /var/log/callreports_standalone.log
+# - Configuración: /var/www/html/callreports/config/
+#
+# ¡Instalación completada! 🚀
